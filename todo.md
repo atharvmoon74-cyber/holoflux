@@ -1,0 +1,4 @@
+- [x] Locate every React list using hand handedness or dynamic hand IDs as a child key.
+- [x] Make rendered hand-reticle keys unique and stable for repeated handedness labels.
+- [x] Run tests, type checking, production build, and review client runtime logs for key warnings.
+- [ ] Save and deliver the corrected project checkpoint.

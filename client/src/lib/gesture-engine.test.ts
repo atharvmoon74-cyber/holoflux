@@ -39,6 +39,12 @@ describe("GestureEngine", () => {
     expect(frame.twoHands?.active).toBe(true);
     expect(frame.twoHands?.bothOpen).toBe(true);
   });
+
+  it("assigns unique IDs when vision briefly labels both detected hands alike", () => {
+    const engine = new GestureEngine();
+    const frame = engine.update([rawWithExtended([1]), rawWithExtended([1])], DEFAULT_CONFIG);
+    expect(new Set(frame.hands.map((hand) => hand.id)).size).toBe(2);
+  });
 });
 
 describe("mergeConfig", () => {

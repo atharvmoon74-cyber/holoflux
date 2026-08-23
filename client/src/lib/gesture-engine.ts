@@ -27,7 +27,9 @@ export class GestureEngine {
   }
 
   private toPose(raw: RawVisionHand, index: number, config: HoloConfig, dt: number, now: number): HandPose {
-    const id = raw.handedness === "Unknown" ? `hand-${index}` : raw.handedness.toLowerCase();
+    // MediaPipe can transiently report the same handedness for both hands; include
+    // frame order to keep React keys and force-field identifiers unique.
+    const id = raw.handedness === "Unknown" ? `hand-${index}` : `${raw.handedness.toLowerCase()}-${index}`;
     const points = raw.landmarks.map((point) => ({ x: 1 - point.x, y: point.y }));
     const wrist = points[0] ?? { x: 0.5, y: 0.5 };
     const palm = points[9] ?? wrist;
