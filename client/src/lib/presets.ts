@@ -20,6 +20,8 @@ export const DEFAULT_CONFIG: HoloConfig = {
     dominantHand: "auto",
     gestureMap: { idle: "attract", index: "attract", pinch: "gravity", palm: "repel", fist: "blackhole", two: "freeze" },
   },
+  brush: { mode: "draw", size: 0.18, density: 0.58, lifetime: 0.72, mass: 0.5 },
+  camera: { mode: "free", fov: 44, drift: 0.35 },
   collisionMode: "elastic",
   collisionEnergy: 72,
   shockwave: true,
@@ -54,5 +56,7 @@ export function mergeConfig(base: HoloConfig, patch: Partial<HoloConfig>): HoloC
     motion: { ...base.motion, ...(patch.motion ?? {}) },
     visuals: { ...base.visuals, ...(patch.visuals ?? {}) },
     interaction: { ...base.interaction, ...(patch.interaction ?? {}), gestureMap: { ...base.interaction.gestureMap, ...(patch.interaction?.gestureMap ?? {}) } },
+    brush: { ...base.brush, ...(patch.brush ?? {}) },
+    camera: { ...base.camera, ...(patch.camera ?? {}) },
   };
 }

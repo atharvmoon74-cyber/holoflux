@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { GestureEngine } from "./gesture-engine";
 import { DEFAULT_CONFIG, mergeConfig } from "./presets";
 import { profileFor } from "./performance-profile";
+import { universeFromSeed } from "./universe-generator";
 import type { RawVisionHand } from "./vision-engine";
 
 type Point = { x: number; y: number; z: number };
@@ -73,5 +74,14 @@ describe("quality profiles", () => {
     expect(profileFor("eco").total).toBeGreaterThanOrEqual(10000);
     expect(profileFor("ultra").total).toBeGreaterThanOrEqual(100000);
     expect(profileFor("extreme").total).toBeGreaterThanOrEqual(200000);
+  });
+});
+
+describe("seeded universes", () => {
+  it("recreates the same universe configuration from the same local seed", () => {
+    const first = universeFromSeed("HF-OMEGA", DEFAULT_CONFIG);
+    const second = universeFromSeed("HF-OMEGA", DEFAULT_CONFIG);
+    expect(second).toEqual(first);
+    expect(universeFromSeed("HF-ANOTHER", DEFAULT_CONFIG).visuals.colorA).not.toEqual(first.visuals.colorA);
   });
 });

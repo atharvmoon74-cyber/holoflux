@@ -23,6 +23,8 @@ type Shockwave = { position: Vec2; born: number; strength: number };
 
 const MAX_INTERACTIVE_PARTICLES = 25000;
 const DEPTH_LAYER_COUNTS = [0.1, 0.34, 0.56] as const;
+const SPECIES_MASSES = [0.72, 1.45, 0.36, 0.22, 2.2, 0.5, 1.12] as const;
+const SPECIES_SIZES = [0.88, 0.58, 1.04, 0.46, 1.84, 0.92, 1.28] as const;
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 const lerp = (from: number, to: number, amount: number) => from + (to - from) * amount;
 
@@ -250,6 +252,8 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
     reset: () => handleRef.current?.reset(),
     focus: (position) => handleRef.current?.focus(position),
     getCanvas: () => handleRef.current?.getCanvas() ?? null,
+    addExperiment: (field) => handleRef.current?.addExperiment(field),
+    clearExperiments: () => handleRef.current?.clearExperiments(),
   }), []);
 
   useEffect(() => {
@@ -282,6 +286,7 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
     const targets = new Float32Array(MAX_INTERACTIVE_PARTICLES * 3);
     const colors = new Float32Array(MAX_INTERACTIVE_PARTICLES * 3);
     const sizes = new Float32Array(MAX_INTERACTIVE_PARTICLES);
+    const masses = new Float32Array(MAX_INTERACTIVE_PARTICLES);
     let previousFrameTime = performance.now();
     const cyan = new THREE.Color(config.visuals.colorA ?? "#79F3FF");
     const violet = new THREE.Color(config.visuals.colorB ?? "#9C7BFF");
@@ -298,11 +303,13 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
           positions[ix + 2] = targets[ix + 2] + (seeded(index, 43) - 0.5) * 3;
         }
         const hue = seeded(index, 44);
+        const species = index % SPECIES_MASSES.length;
         color.copy(cyan).lerp(violet, hue);
         colors[ix] = color.r;
         colors[ix + 1] = color.g;
         colors[ix + 2] = color.b;
-        sizes[index] = 0.72 + seeded(index, 45) * 1.75;
+        sizes[index] = SPECIES_SIZES[species] * (0.78 + seeded(index, 45) * 0.92);
+        masses[index] = SPECIES_MASSES[species];
       }
       geometry.setDrawRange(0, active);
     };
@@ -347,6 +354,9 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
       return mesh;
     });
     const forces: ForceField[] = [];
+    const persistentForces: ForceField[] = [];
+    const brushForces: ForceField[] = [];
+    const lastBrushByHand = new Map<string, { position: Vec2; at: number }>();
     const shockwaves: Shockwave[] = [];
     let forceSeedActive = false;
     let lastTwoDistance = 0;
@@ -364,6 +374,7 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
     let collisionTick = 0;
     let lastCollision = 0;
     let lastManualId = 0;
+    let spawnCursor = 0;
 
     const addForce = (field: ForceField) => {
       const existing = forces.find((item) => item.id === field.id);
@@ -373,6 +384,24 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
     const emitShockwave = (position: Vec2, strength: number, event: string, tone: "cyan" | "coral" | "violet" = "coral") => {
       shockwaves.push({ position, strength, born: performance.now() });
       if (configRef.current.shockwave) onEvent(event, tone);
+    };
+    const seedParticlesAt = (position: Vec2, density: number, velocity: Vec2) => {
+      const active = Math.max(1, geometry.drawRange.count);
+      const originX = (position.x - 0.5) * 10;
+      const originY = -(position.y - 0.5) * 6;
+      const count = Math.round(18 + density * 96);
+      for (let step = 0; step < count; step += 1) {
+        const index = (spawnCursor + step) % active;
+        const ix = index * 3;
+        positions[ix] = originX + (seeded(index + step, 101) - 0.5) * 0.28;
+        positions[ix + 1] = originY + (seeded(index + step, 102) - 0.5) * 0.28;
+        positions[ix + 2] = (seeded(index + step, 103) - 0.5) * 0.4;
+        velocities[ix] = velocity.x * 0.34;
+        velocities[ix + 1] = -velocity.y * 0.28;
+        velocities[ix + 2] = (seeded(index + step, 104) - 0.5) * 0.14;
+        masses[index] = 0.3 + configRef.current.brush.mass * 2.1;
+      }
+      spawnCursor = (spawnCursor + count) % active;
     };
     const publishForces = () => {
       const frameData = gesturesRef.current;
@@ -402,6 +431,17 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
           addForce({ id: `${hand.id}-release`, type: "explosion", position: hand.predictedPosition, strength: Math.min(4.2, 1.35 * currentConfig.physics.explosionPower * hand.forceMultiplier), radius: clamp(0.14 + hand.speed * 0.055, 0.14, 0.34), velocity: hand.velocity, expiresAt: now + 160, label: "PINCH RELEASE" });
           emitShockwave(hand.predictedPosition, Math.min(2.2, hand.forceMultiplier), "PINCH RELEASE · ENERGY BURST", "coral");
         }
+        if (hand.gesture === "pinch" && hand.speed > 0.08) {
+          const previousBrush = lastBrushByHand.get(hand.id);
+          const moved = previousBrush ? Math.hypot(previousBrush.position.x - hand.predictedPosition.x, previousBrush.position.y - hand.predictedPosition.y) : 1;
+          if (moved > 0.014 || !previousBrush || now - previousBrush.at > 72) {
+            const mode = currentConfig.brush.mode;
+            const brushType: ForceField["type"] = mode === "erase" || mode === "repel" ? "repel" : mode === "freeze" ? "freeze" : mode === "spawn" ? "explosion" : mode === "draw" ? "vortex" : "attract";
+            brushForces.push({ id: `brush-${hand.id}-${now.toFixed(0)}`, type: brushType, position: hand.predictedPosition, strength: 0.35 + currentConfig.brush.density * 0.95, radius: currentConfig.brush.size, velocity: hand.velocity, expiresAt: now + 260 + currentConfig.brush.lifetime * 1350, label: `BRUSH ${mode.toUpperCase()}` });
+            if (mode === "spawn" || mode === "draw") seedParticlesAt(hand.predictedPosition, currentConfig.brush.density, hand.velocity);
+            lastBrushByHand.set(hand.id, { position: hand.predictedPosition, at: now });
+          }
+        } else if (hand.gesture !== "pinch") lastBrushByHand.delete(hand.id);
       });
       const two = frameData.twoHands;
       if (two && hands.length >= 2) {
@@ -433,6 +473,16 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
         const type = manual.type === "explosion" ? "explosion" : manual.type === "blackhole" ? "blackhole" : "vortex";
         addForce({ id: `manual-${manual.id}`, type, position: manual.position, strength: manual.type === "explosion" ? 2.4 * currentConfig.physics.explosionPower : 1.8, radius: manual.type === "blackhole" ? 0.42 : 0.34, label: manual.type.toUpperCase() });
         emitShockwave(manual.position, manual.type === "explosion" ? 1.8 : 0.8, manual.type === "galaxy" ? "GALAXY FIELD DEPLOYED" : manual.type === "explosion" ? "SUPERNOVA IMPULSE" : `${manual.type.toUpperCase()} FIELD ACTIVE`, manual.type === "explosion" ? "coral" : "violet");
+      }
+      for (let index = persistentForces.length - 1; index >= 0; index -= 1) {
+        const field = persistentForces[index];
+        if (field.expiresAt && field.expiresAt < now) { persistentForces.splice(index, 1); continue; }
+        addForce(field);
+      }
+      for (let index = brushForces.length - 1; index >= 0; index -= 1) {
+        const field = brushForces[index];
+        if (field.expiresAt && field.expiresAt < now) { brushForces.splice(index, 1); continue; }
+        addForce(field);
       }
     };
     const resolveSampledCollisions = (count: number) => {
@@ -515,10 +565,15 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
       const rootAngle = now * 0.00016 * currentConfig.motion.rotation;
       root.rotation.z = lerp(root.rotation.z, rootAngle, 0.018);
       root.scale.setScalar(lerp(root.scale.x, cameraScale * zoomRef.current, 0.035));
+      const cameraMode = currentConfig.camera.mode;
+      if (Math.abs(camera.fov - currentConfig.camera.fov) > 0.05) { camera.fov = lerp(camera.fov, currentConfig.camera.fov, 0.12); camera.updateProjectionMatrix(); }
+      const targetDistance = cameraMode === "macro" ? 5.4 : cameraMode === "deepSpace" ? 17.6 : 10.6;
+      camera.position.z = lerp(camera.position.z, targetDistance, 0.035);
       for (let index = 0; index < active; index += 1) {
         const ix = index * 3;
         const px = positions[ix]; const py = positions[ix + 1]; const pz = positions[ix + 2];
         let vx = velocities[ix]; let vy = velocities[ix + 1]; let vz = velocities[ix + 2];
+        const particleMass = Math.max(0.18, masses[index] || 1);
         const toTargetX = targets[ix] - px;
         const toTargetY = targets[ix + 1] - py;
         const toTargetZ = targets[ix + 2] - pz;
@@ -558,7 +613,7 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
           const d = Math.sqrt(d2);
           const radius = Math.max(0.2, field.radius * 10);
           if (d > radius && field.type !== "tunnel") return;
-          const falloff = Math.pow(clamp(1 - d / radius, 0, 1), 1.25) * field.strength * currentConfig.interaction.forceStrength;
+          const falloff = Math.pow(clamp(1 - d / radius, 0, 1), 1.25) * field.strength * currentConfig.interaction.forceStrength / particleMass;
           if (field.type === "attract" || field.type === "gravity") { vx += (dx / d) * falloff * 0.082; vy += (dy / d) * falloff * 0.082; vz += (dz / d) * falloff * 0.046; }
           if (field.type === "repel" || field.type === "explosion") { vx -= (dx / d) * falloff * (field.type === "explosion" ? 0.34 : 0.15); vy -= (dy / d) * falloff * (field.type === "explosion" ? 0.34 : 0.15); vz -= (dz / d) * falloff * 0.09; }
           if (field.type === "blackhole" || field.type === "vortex") {
@@ -586,7 +641,7 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
           const ring = Math.abs(d - age * 5.6);
           if (ring < 0.34) { const punch = (1 - ring / 0.34) * wave.strength * 0.13; vx += dx / d * punch; vy += dy / d * punch; }
         });
-        const damping = Math.max(0.82, 1 - (currentConfig.physics.drag * 0.036 + currentConfig.physics.viscosity * 0.018 + (1 - currentConfig.particles.lifetime) * 0.012));
+        const damping = Math.max(0.82, 1 - (currentConfig.physics.drag * 0.036 + currentConfig.physics.viscosity * 0.018 / particleMass + (1 - currentConfig.particles.lifetime) * 0.012));
         velocities[ix] = vx * damping;
         velocities[ix + 1] = vy * damping;
         velocities[ix + 2] = vz * damping;
@@ -649,7 +704,10 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
         halo.scale.setScalar((primary.gesture === "fist" ? 2.3 : primary.gesture === "palm" ? 1.65 : 1) * currentConfig.interaction.radius * 2.3);
         (halo.material as THREE.MeshBasicMaterial).color.set(primary.gesture === "palm" ? 0xff8d86 : primary.gesture === "fist" ? 0xaf8dff : 0x79f3ff);
       } else halo.visible = false;
-      focusPoint.lerp(new THREE.Vector2(0, 0), 0.01);
+      if (cameraMode === "followHand" && primary) focusPoint.set((primary.predictedPosition.x - 0.5) * 2, -(primary.predictedPosition.y - 0.5) * 1.25);
+      else if (cameraMode === "orbit" || cameraMode === "cinematic") focusPoint.set(Math.sin(now * 0.00018) * currentConfig.camera.drift * 1.8, Math.cos(now * 0.00013) * currentConfig.camera.drift * 0.92);
+      else if (cameraMode === "followEvent" && shockwaves[0]) focusPoint.set((shockwaves[0].position.x - 0.5) * 1.8, -(shockwaves[0].position.y - 0.5) * 1.08);
+      else focusPoint.lerp(new THREE.Vector2(0, 0), 0.01);
       camera.position.x = lerp(camera.position.x, focusPoint.x, 0.02);
       camera.position.y = lerp(camera.position.y, focusPoint.y, 0.02);
       camera.lookAt(0, 0, 0);
@@ -700,6 +758,11 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
       },
       focus: (position) => { focusPoint.set((position.x - 0.5) * 0.6, -(position.y - 0.5) * 0.36); },
       getCanvas: () => renderer.domElement,
+      addExperiment: (field) => {
+        persistentForces.push({ ...field, id: `experiment-${performance.now().toFixed(2)}-${persistentForces.length}` });
+        emitShockwave(field.position, Math.min(1.2, field.strength), `${(field.label ?? field.type).toUpperCase()} EXPERIMENT DEPLOYED`, "violet");
+      },
+      clearExperiments: () => { persistentForces.length = 0; onEvent("EXPERIMENT FIELDS CLEARED", "cyan"); },
     };
     window.addEventListener("resize", resize);
     resize();

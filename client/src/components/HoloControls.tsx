@@ -2,11 +2,11 @@
  * HOLOFLUX design reminder — Orbital Observatory: this is a quiet instrument bay; each control changes the live physics field.
  */
 import { useRef } from "react";
-import { ArchiveRestore, Atom, Box, Camera, CircleDotDashed, Dna, Download, Gauge, Hand, Orbit, Palette, Play, Plus, RotateCcw, Save, Sparkles, Trash2, Upload } from "lucide-react";
-import type { CollisionMode, Formation, GestureAction, GestureName, HoloConfig, Metrics, Preset, QualityTier, UniverseMode } from "@/lib/holo-types";
+import { ArchiveRestore, Atom, Box, Camera, CircleDotDashed, Dna, Download, Gauge, Hand, Orbit, Palette, Play, Plus, RotateCcw, Save, Sparkles, Trash2, Upload, WandSparkles } from "lucide-react";
+import type { BrushMode, CameraMode, CollisionMode, ForceField, ForceType, Formation, GestureAction, GestureName, HoloConfig, Metrics, Preset, QualityTier, UniverseMode } from "@/lib/holo-types";
 import { BUILT_IN_PRESETS } from "@/lib/presets";
 
-export type PanelId = "mode" | "physics" | "particles" | "gestures" | "visuals" | "presets" | "collision" | "calibration" | "performance";
+export type PanelId = "mode" | "physics" | "particles" | "gestures" | "visuals" | "presets" | "collision" | "calibration" | "performance" | "experiment";
 
 type Props = {
   open: boolean;
@@ -22,6 +22,11 @@ type Props = {
   onDeletePreset: (id: string) => void;
   onResetControls: () => void;
   onCapture: () => void;
+  onAddExperiment: (field: Omit<ForceField, "id">) => void;
+  onClearExperiments: () => void;
+  onGenerateUniverse: () => void;
+  onReplayEvents: () => void;
+  universeSeed: string;
 };
 
 const modeData: Array<{ id: UniverseMode; label: string; glyph: string }> = [
@@ -48,15 +53,17 @@ function SectionTitle({ kicker, title, detail }: { kicker: string; title: string
   return <div className="panel-title"><span>{kicker}</span><h2>{title}</h2>{detail && <p>{detail}</p>}</div>;
 }
 
-export default function HoloControls({ open, active, config, metrics, customPresets, onActive, onPatch, onPreset, onSavePreset, onImportPreset, onDeletePreset, onResetControls, onCapture }: Props) {
+export default function HoloControls({ open, active, config, metrics, customPresets, onActive, onPatch, onPreset, onSavePreset, onImportPreset, onDeletePreset, onResetControls, onCapture, onAddExperiment, onClearExperiments, onGenerateUniverse, onReplayEvents, universeSeed }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
   const patchParticles = (patch: Partial<HoloConfig["particles"]>) => onPatch({ particles: { ...config.particles, ...patch } });
   const patchPhysics = (patch: Partial<HoloConfig["physics"]>) => onPatch({ physics: { ...config.physics, ...patch } });
   const patchMotion = (patch: Partial<HoloConfig["motion"]>) => onPatch({ motion: { ...config.motion, ...patch } });
   const patchVisuals = (patch: Partial<HoloConfig["visuals"]>) => onPatch({ visuals: { ...config.visuals, ...patch } });
   const patchInteraction = (patch: Partial<HoloConfig["interaction"]>) => onPatch({ interaction: { ...config.interaction, ...patch } });
+  const patchBrush = (patch: Partial<HoloConfig["brush"]>) => onPatch({ brush: { ...config.brush, ...patch } });
+  const patchCamera = (patch: Partial<HoloConfig["camera"]>) => onPatch({ camera: { ...config.camera, ...patch } });
   const nav: Array<{ id: PanelId; label: string; icon: typeof Orbit }> = [
-    { id: "mode", label: "Mode", icon: Orbit }, { id: "physics", label: "Physics", icon: Atom }, { id: "particles", label: "Particles", icon: Sparkles }, { id: "gestures", label: "Gestures", icon: Hand }, { id: "visuals", label: "Visuals", icon: Palette }, { id: "presets", label: "Presets", icon: ArchiveRestore }, { id: "collision", label: "Collision Lab", icon: CircleDotDashed }, { id: "calibration", label: "Calibrate", icon: Gauge }, { id: "performance", label: "Quality", icon: Gauge },
+    { id: "mode", label: "Mode", icon: Orbit }, { id: "physics", label: "Physics", icon: Atom }, { id: "particles", label: "Particles", icon: Sparkles }, { id: "gestures", label: "Gestures", icon: Hand }, { id: "visuals", label: "Visuals", icon: Palette }, { id: "presets", label: "Presets", icon: ArchiveRestore }, { id: "collision", label: "Collision Lab", icon: CircleDotDashed }, { id: "calibration", label: "Calibrate", icon: Gauge }, { id: "performance", label: "Quality", icon: Gauge }, { id: "experiment", label: "Experiment", icon: WandSparkles },
   ];
   const importPreset = (file: File | undefined) => {
     if (!file) return;
@@ -144,6 +151,24 @@ export default function HoloControls({ open, active, config, metrics, customPres
         <Toggle label="Force performance mode" checked={config.performanceMode} onChange={(value) => onPatch({ performanceMode: value })} />
         <button className="primary-action" onClick={() => onPatch({ qualityTier: "extreme", performanceMode: false, particles: { ...config.particles, density: 1, trailLength: 0.9 }, physics: { ...config.physics, turbulence: Math.max(0.48, config.physics.turbulence), explosionPower: Math.max(1.6, config.physics.explosionPower) } })}><Sparkles size={16} />Extreme Universe</button>
         <div className="gesture-card"><Gauge size={18} /><p><b>Optimized for your device</b><br />Low frame rates reduce workload gradually. Stable performance restores detail without a visual jump.</p></div>
+      </>}
+      {active === "experiment" && <>
+        <SectionTitle kicker="OMEGA experiment lab" title="Compose active fields" detail="Deployed fields persist in the live force solver until cleared; they are not visual placeholders." />
+        <div className="experiment-grid">{(["gravity", "blackhole", "vortex", "repel", "explosion"] as ForceType[]).map((type) => <button key={type} onClick={() => onAddExperiment({ type, position: { x: 0.5, y: 0.5 }, strength: type === "explosion" ? 1.6 : 1.05, radius: type === "blackhole" ? 0.34 : 0.26, label: type })}><Plus size={14} />{type}</button>)}</div>
+        <div className="split-actions"><button className="secondary-action" onClick={onClearExperiments}><Trash2 size={15} />Clear fields</button><button className="secondary-action" onClick={onReplayEvents}><Play size={15} />Replay manual events</button></div>
+        <div className="panel-divider" />
+        <SectionTitle kicker="Air brush" title="Gesture painting" detail="Hold a pinch while moving to lay down a living force trail." />
+        <div className="select-row"><span>Brush mode</span><select value={config.brush.mode} onChange={(event) => patchBrush({ mode: event.target.value as BrushMode })}>{(["draw", "erase", "attract", "repel", "spawn", "freeze"] as BrushMode[]).map((mode) => <option key={mode} value={mode}>{mode}</option>)}</select></div>
+        <Slider label="Brush size" value={config.brush.size} min={0.06} max={0.46} step={0.01} onChange={(value) => patchBrush({ size: value })} />
+        <Slider label="Brush density" value={config.brush.density} min={0.1} max={1} step={0.01} onChange={(value) => patchBrush({ density: value })} />
+        <Slider label="Brush lifetime" value={config.brush.lifetime} min={0.1} max={1} step={0.01} onChange={(value) => patchBrush({ lifetime: value })} />
+        <div className="panel-divider" />
+        <SectionTitle kicker="Cosmic camera" title="Choose perspective" />
+        <div className="select-row"><span>Camera mode</span><select value={config.camera.mode} onChange={(event) => patchCamera({ mode: event.target.value as CameraMode })}>{(["free", "orbit", "cinematic", "followHand", "followEvent", "macro", "deepSpace"] as CameraMode[]).map((mode) => <option key={mode} value={mode}>{mode}</option>)}</select></div>
+        <Slider label="Camera field of view" value={config.camera.fov} min={28} max={74} step={1} suffix="°" onChange={(value) => patchCamera({ fov: value })} />
+        <Slider label="Camera drift" value={config.camera.drift} min={0} max={1} step={0.01} onChange={(value) => patchCamera({ drift: value })} />
+        <button className="primary-action" onClick={onGenerateUniverse}><WandSparkles size={16} />Generate universe</button>
+        <div className="seed-readout"><span>UNIVERSE SEED</span><b>{universeSeed}</b></div>
       </>}
       {active === "presets" && <>
         <SectionTitle kicker="Memory bank" title="Universe presets" detail="Built-in and saved configurations update the running field immediately." />

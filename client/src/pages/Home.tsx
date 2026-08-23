@@ -11,6 +11,7 @@ import type { GestureFrame, GestureName, HandPose, HoloConfig, Metrics, Particle
 import { BUILT_IN_PRESETS, DEFAULT_CONFIG, mergeConfig } from "@/lib/presets";
 import { VisionEngine } from "@/lib/vision-engine";
 import { detectInitialQuality, profileFor } from "@/lib/performance-profile";
+import { createUniverseSeed, universeFromSeed } from "@/lib/universe-generator";
 
 type CameraState = "idle" | "initializing" | "active" | "lost" | "error" | "off";
 type HoloEvent = { id: number; message: string; tone: "cyan" | "coral" | "violet" };
@@ -61,6 +62,8 @@ export default function Home() {
   const [recordingMode, setRecordingMode] = useState(false);
   const [audioEnergy, setAudioEnergy] = useState(0);
   const [savedPresets, setSavedPresets] = useState<Preset[]>(() => { try { return JSON.parse(localStorage.getItem("holoflux-presets") || "[]"); } catch { return []; } });
+  const [universeSeed, setUniverseSeed] = useState(() => createUniverseSeed());
+  const [eventHistory, setEventHistory] = useState<Array<HoloEvent & { at: number }>>([]);
   const fieldRef = useRef<ParticleFieldHandle>(null);
   const visionRef = useRef<VisionEngine | null>(null);
   const gestureEngineRef = useRef(new GestureEngine());
@@ -74,6 +77,7 @@ export default function Home() {
   const holdTimerRef = useRef<number | null>(null);
   const eventTimerRef = useRef<number | null>(null);
   const manualIdRef = useRef(0);
+  const eventTimelineRef = useRef<Array<NonNullable<ManualEvent>>>([]);
   const configRef = useRef(config);
   const liveGestureRef = useRef<GestureFrame>(EMPTY_FRAME);
   const lastGestureUiUpdateRef = useRef(0);
@@ -90,14 +94,35 @@ export default function Home() {
   const pushEvent = useCallback((message: string, tone: HoloEvent["tone"] = "cyan") => {
     const next = { id: Date.now(), message, tone };
     setEvent(next);
+    setEventHistory((current) => [{ ...next, at: Date.now() }, ...current].slice(0, 7));
     if (eventTimerRef.current) window.clearTimeout(eventTimerRef.current);
     eventTimerRef.current = window.setTimeout(() => setEvent((current) => current?.id === next.id ? null : current), 3000);
   }, []);
   const patchConfig = useCallback((patch: Partial<HoloConfig>) => setConfig((current) => mergeConfig(current, patch)), []);
   const submitManualEvent = useCallback((type: NonNullable<ManualEvent>["type"], position: Vec2 = { x: 0.5, y: 0.5 }) => {
     manualIdRef.current += 1;
-    setManualEvent({ id: manualIdRef.current, type, position });
+    const next = { id: manualIdRef.current, type, position } as NonNullable<ManualEvent>;
+    eventTimelineRef.current = [...eventTimelineRef.current, next].slice(-12);
+    setManualEvent(next);
   }, []);
+  const addExperiment = useCallback((field: Parameters<NonNullable<ParticleFieldHandle["addExperiment"]>>[0]) => fieldRef.current?.addExperiment(field), []);
+  const clearExperiments = useCallback(() => fieldRef.current?.clearExperiments(), []);
+  const generateUniverse = useCallback(() => {
+    const nextSeed = createUniverseSeed();
+    setUniverseSeed(nextSeed);
+    setConfig((current) => universeFromSeed(nextSeed, current));
+    fieldRef.current?.reset();
+    pushEvent(`UNIVERSE GENERATED · ${nextSeed}`, "violet");
+  }, [pushEvent]);
+  const replayEvents = useCallback(() => {
+    const events = eventTimelineRef.current.slice(-8);
+    if (!events.length) { pushEvent("NO RECORDED FORCE EVENTS YET", "coral"); return; }
+    pushEvent("REPLAYING RECORDED FORCE EVENTS", "cyan");
+    events.forEach((eventLike, index) => window.setTimeout(() => {
+      manualIdRef.current += 1;
+      setManualEvent({ ...eventLike, id: manualIdRef.current });
+    }, index * 420));
+  }, [pushEvent]);
   const handleMetrics = useCallback((next: Metrics) => setMetrics((current) => ({ ...next, trackingLatency: current.trackingLatency, trackingFps: current.trackingFps })), []);
   useEffect(() => { visionRef.current?.setInferenceInterval(profileFor(config.qualityTier).trackingInterval); }, [config.qualityTier]);
 
@@ -271,7 +296,7 @@ export default function Home() {
       {cameraState === "lost" && <div className="soft-alert"><Hand size={16} /><span><b>Hands temporarily lost.</b> Move into better lighting or continue with mouse controls.</span></div>}
       {cameraState === "error" && <div className="soft-alert error"><VideoOff size={16} /><span><b>We couldn't access your camera.</b> {cameraMessage || "You can continue with mouse controls."}</span><button onClick={() => setCameraState("off")}>Use mouse</button></div>}
       {cameraPreview && streamRef.current && <section className="camera-preview"><div><span>LOCAL CAMERA</span><button onClick={() => setCameraPreview(false)}><X size={14} /></button></div><video ref={previewVideoRef} autoPlay muted playsInline /></section>}
-      <HoloControls open={panelOpen} active={activePanel} config={config} metrics={metrics} customPresets={savedPresets} onActive={setActivePanel} onPatch={patchConfig} onPreset={selectPreset} onSavePreset={savePreset} onImportPreset={importPreset} onDeletePreset={deletePreset} onResetControls={resetControls} onCapture={capturePhoto} />
+      <HoloControls open={panelOpen} active={activePanel} config={config} metrics={metrics} customPresets={savedPresets} onActive={setActivePanel} onPatch={patchConfig} onPreset={selectPreset} onSavePreset={savePreset} onImportPreset={importPreset} onDeletePreset={deletePreset} onResetControls={resetControls} onCapture={capturePhoto} onAddExperiment={addExperiment} onClearExperiments={clearExperiments} onGenerateUniverse={generateUniverse} onReplayEvents={replayEvents} universeSeed={universeSeed} />
       <nav className="command-dock" aria-label="Universe commands">
         <button onClick={() => setPanelOpen((current) => !current)} className={panelOpen ? "dock-active" : ""} title="Universe controls"><Settings2 size={18} /><span>Configure</span></button>
         <button onClick={() => setPaused((current) => !current)} title="Play or pause"><>{paused ? <Play size={18} /> : <Pause size={18} />}</><span>{paused ? "Resume" : "Pause"}</span></button>
@@ -286,6 +311,7 @@ export default function Home() {
       </nav>
       <footer className="bottom-credit"><span>SCROLL TO ZOOM · DOUBLE CLICK TO EXPLODE</span><b>Made by Atharv Moon · IIT Tirupati</b><button onClick={() => setDebug((current) => !current)} aria-label="Toggle developer panel">DEV</button></footer>
       {debug && <aside className="dev-panel"><div><b>DEVELOPER MODE</b><button onClick={() => setDebug(false)}><X size={14} /></button></div><dl><dt>FPS</dt><dd>{metrics.fps}</dd><dt>FRAME TIME</dt><dd>{metrics.frameTime}ms</dd><dt>PARTICLES</dt><dd>{metrics.particleCount.toLocaleString()}</dd><dt>TARGET</dt><dd>{metrics.targetParticles.toLocaleString()}</dd><dt>FORCES</dt><dd>{metrics.activeForces}</dd><dt>TRACKING</dt><dd>{metrics.trackingLatency}ms · {metrics.trackingFps}hz</dd><dt>ACTIVE HANDS</dt><dd>{gestureFrame.hands.length}</dd><dt>GESTURE</dt><dd>{gestureFrame.hands[0]?.gesture ?? "none"}</dd><dt>QUALITY</dt><dd>{metrics.qualityTier} · {metrics.adaptiveLevel}</dd><dt>RENDER</dt><dd>{metrics.renderMode}</dd></dl></aside>}
+      {debug && eventHistory.length > 0 && <aside className="event-history"><b>EVENT HISTORY</b>{eventHistory.map((item) => <span key={`${item.id}-${item.at}`}>{item.message}</span>)}</aside>}
     </>}
 
     {boot && <section className="boot-sequence" aria-label="Initializing HOLOFLUX"><div className="boot-mark"><img src="/manus-storage/holoflux-flux-logo_bc663407.png" alt="" /><span /></div><h1>HOLOFLUX</h1><p>A LIVING PARTICLE UNIVERSE</p><div className="boot-lines">{bootLines.map((line, index) => <span key={line} style={{ animationDelay: `${0.36 + index * 0.52}s` }}>{line}<i /></span>)}</div></section>}

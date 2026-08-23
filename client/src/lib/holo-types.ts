@@ -26,6 +26,8 @@ export type UniverseMode = "galaxy" | "vortex" | "blackhole" | "supernova" | "qu
 export type Formation = "sphere" | "heart" | "galaxy" | "spiral" | "dna" | "cube" | "torus" | "flower" | "saturn" | "infinity" | "star" | "wave" | "text";
 export type CollisionMode = "bounce" | "merge" | "explode" | "elastic" | "soft";
 export type QualityTier = "eco" | "balanced" | "high" | "ultra" | "extreme" | "custom";
+export type BrushMode = "draw" | "erase" | "attract" | "repel" | "spawn" | "freeze";
+export type CameraMode = "free" | "orbit" | "cinematic" | "followHand" | "followEvent" | "macro" | "deepSpace";
 
 export interface ForceField {
   id: string;
@@ -134,6 +136,18 @@ export interface HoloConfig {
     dominantHand: "auto" | "left" | "right";
     gestureMap: Record<GestureName, GestureAction>;
   };
+  brush: {
+    mode: BrushMode;
+    size: number;
+    density: number;
+    lifetime: number;
+    mass: number;
+  };
+  camera: {
+    mode: CameraMode;
+    fov: number;
+    drift: number;
+  };
   collisionMode: CollisionMode;
   collisionEnergy: number;
   shockwave: boolean;
@@ -169,4 +183,6 @@ export interface ParticleFieldHandle {
   reset: () => void;
   focus: (position: Vec2) => void;
   getCanvas: () => HTMLCanvasElement | null;
+  addExperiment: (field: Omit<ForceField, "id">) => void;
+  clearExperiments: () => void;
 }
