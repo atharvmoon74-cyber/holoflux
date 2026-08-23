@@ -12,6 +12,7 @@ export class VisionEngine {
   private raf = 0;
   private lastVideoTime = -1;
   private lastInference = 0;
+  private inferenceInterval = 28;
   private running = false;
 
   constructor(
@@ -23,17 +24,18 @@ export class VisionEngine {
     this.onStatus("initializing");
     try {
       const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm");
-      this.landmarker = await HandLandmarker.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task",
-          delegate: "GPU",
-        },
-        runningMode: "VIDEO",
+      const options = {
+        runningMode: "VIDEO" as const,
         numHands: 2,
         minHandDetectionConfidence: 0.52,
         minHandPresenceConfidence: 0.48,
         minTrackingConfidence: 0.48,
-      });
+      };
+      try {
+        this.landmarker = await HandLandmarker.createFromOptions(vision, { ...options, baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task", delegate: "GPU" } });
+      } catch {
+        this.landmarker = await HandLandmarker.createFromOptions(vision, { ...options, baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task", delegate: "CPU" } });
+      }
       this.stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 960 }, height: { ideal: 540 }, facingMode: "user" }, audio: false });
       this.video = document.createElement("video");
       this.video.autoplay = true;
@@ -54,10 +56,12 @@ export class VisionEngine {
 
   getStream() { return this.stream; }
 
+  setInferenceInterval(milliseconds: number) { this.inferenceInterval = Math.max(20, milliseconds); }
+
   private detect = () => {
     if (!this.running || !this.video || !this.landmarker) return;
     const now = performance.now();
-    if (this.video.readyState >= 2 && this.video.currentTime !== this.lastVideoTime && now - this.lastInference > 28) {
+    if (this.video.readyState >= 2 && this.video.currentTime !== this.lastVideoTime && now - this.lastInference > this.inferenceInterval) {
       this.lastVideoTime = this.video.currentTime;
       this.lastInference = now;
       const started = performance.now();

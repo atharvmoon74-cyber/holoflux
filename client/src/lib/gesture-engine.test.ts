@@ -4,6 +4,7 @@
 import { describe, expect, it } from "vitest";
 import { GestureEngine } from "./gesture-engine";
 import { DEFAULT_CONFIG, mergeConfig } from "./presets";
+import { profileFor } from "./performance-profile";
 import type { RawVisionHand } from "./vision-engine";
 
 type Point = { x: number; y: number; z: number };
@@ -45,6 +46,18 @@ describe("GestureEngine", () => {
     const frame = engine.update([rawWithExtended([1]), rawWithExtended([1])], DEFAULT_CONFIG);
     expect(new Set(frame.hands.map((hand) => hand.id)).size).toBe(2);
   });
+
+  it("keeps a raw fingertip sample while predicting short-term movement for an immediate force response", () => {
+    const engine = new GestureEngine();
+    const first = rawWithExtended([1]);
+    first.landmarks[8].x = 0.62;
+    engine.update([first], DEFAULT_CONFIG);
+    const second = rawWithExtended([1]);
+    second.landmarks[8].x = 0.46;
+    const frame = engine.update([second], DEFAULT_CONFIG);
+    expect(frame.hands[0].rawPosition.x).not.toBe(frame.hands[0].predictedPosition.x);
+    expect(frame.hands[0].forceMultiplier).toBeGreaterThan(1);
+  });
 });
 
 describe("mergeConfig", () => {
@@ -52,5 +65,13 @@ describe("mergeConfig", () => {
     const merged = mergeConfig(DEFAULT_CONFIG, { physics: { ...DEFAULT_CONFIG.physics, gravity: 1.1 } });
     expect(merged.physics.gravity).toBe(1.1);
     expect(merged.particles.count).toBe(DEFAULT_CONFIG.particles.count);
+  });
+});
+
+describe("quality profiles", () => {
+  it("declares genuine tier budgets spanning eco through extreme", () => {
+    expect(profileFor("eco").total).toBeGreaterThanOrEqual(10000);
+    expect(profileFor("ultra").total).toBeGreaterThanOrEqual(100000);
+    expect(profileFor("extreme").total).toBeGreaterThanOrEqual(200000);
   });
 });

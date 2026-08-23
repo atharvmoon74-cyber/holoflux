@@ -1,14 +1,16 @@
 /**
  * HOLOFLUX design reminder — Orbital Observatory: the live particle universe is the spectacle; rendering stays deep, physical, and restrained.
  */
-import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, type MutableRefObject } from "react";
 import * as THREE from "three";
 import type { ForceField, GestureFrame, HoloConfig, Metrics, ParticleFieldHandle, Vec2 } from "@/lib/holo-types";
 import { DEFAULT_CONFIG } from "@/lib/presets";
+import { detectInitialQuality, profileFor, type QualityProfile } from "@/lib/performance-profile";
 
 type Props = {
   config: HoloConfig;
   gestureFrame: GestureFrame;
+  gestureFrameRef: MutableRefObject<GestureFrame>;
   paused: boolean;
   audioEnergy: number;
   zoom: number;
@@ -19,7 +21,8 @@ type Props = {
 
 type Shockwave = { position: Vec2; born: number; strength: number };
 
-const MAX_PARTICLES = 14000;
+const MAX_INTERACTIVE_PARTICLES = 25000;
+const DEPTH_LAYER_COUNTS = [0.1, 0.34, 0.56] as const;
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 const lerp = (from: number, to: number, amount: number) => from + (to - from) * amount;
 
@@ -158,17 +161,86 @@ const fragmentShader = `
   }
 `;
 
-const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleField({ config, gestureFrame, paused, audioEnergy, zoom, manualEvent, onMetrics, onEvent }, ref) {
+const depthVertexShader = `
+  attribute float aSeed;
+  varying vec3 vColor;
+  varying float vAlpha;
+  uniform float uTime;
+  uniform float uPixelRatio;
+  uniform float uSize;
+  uniform vec3 uColorA;
+  uniform vec3 uColorB;
+  uniform float uDrift;
+  void main() {
+    vec3 p = position;
+    p.x += sin(uTime * (0.06 + aSeed * 0.05) + aSeed * 71.0 + p.z) * uDrift;
+    p.y += cos(uTime * (0.05 + aSeed * 0.04) + aSeed * 47.0 + p.x) * uDrift;
+    vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
+    float depth = clamp(1.0 - abs(mvPosition.z) / 40.0, 0.08, 1.0);
+    vColor = mix(uColorA, uColorB, aSeed);
+    vAlpha = depth * (0.35 + aSeed * 0.65);
+    gl_PointSize = uSize * uPixelRatio * (15.0 + aSeed * 15.0) / -mvPosition.z;
+    gl_Position = projectionMatrix * mvPosition;
+  }
+`;
+
+const depthFragmentShader = `
+  varying vec3 vColor;
+  varying float vAlpha;
+  void main() {
+    float d = distance(gl_PointCoord, vec2(0.5));
+    float soft = 1.0 - smoothstep(0.08, 0.5, d);
+    gl_FragColor = vec4(vColor * (1.0 + soft * 0.25), soft * vAlpha * 0.62);
+  }
+`;
+
+type DepthLayer = { geometry: THREE.BufferGeometry; material: THREE.ShaderMaterial; points: THREE.Points; baseCount: number };
+
+function createDepthLayer(count: number, radius: number, pointSize: number, colorA: THREE.Color, colorB: THREE.Color, pixelRatio: number): DepthLayer {
+  const positions = new Float32Array(count * 3);
+  const seeds = new Float32Array(count);
+  for (let index = 0; index < count; index += 1) {
+    const angle = seeded(index, radius) * Math.PI * 2;
+    const orbit = Math.pow(seeded(index, radius + 1), 0.42) * radius;
+    const height = (seeded(index, radius + 2) - 0.5) * radius * 0.38;
+    const ix = index * 3;
+    positions[ix] = Math.cos(angle + orbit * 0.2) * orbit;
+    positions[ix + 1] = height;
+    positions[ix + 2] = Math.sin(angle + orbit * 0.2) * orbit - 8 - seeded(index, radius + 3) * 16;
+    seeds[index] = seeded(index, radius + 4);
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute("aSeed", new THREE.BufferAttribute(seeds, 1));
+  geometry.setDrawRange(0, count);
+  const material = new THREE.ShaderMaterial({
+    vertexShader: depthVertexShader,
+    fragmentShader: depthFragmentShader,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    uniforms: {
+      uTime: { value: 0 },
+      uPixelRatio: { value: pixelRatio },
+      uSize: { value: pointSize },
+      uColorA: { value: colorA.clone() },
+      uColorB: { value: colorB.clone() },
+      uDrift: { value: 0.12 },
+    },
+  });
+  return { geometry, material, points: new THREE.Points(geometry, material), baseCount: count };
+}
+
+const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleField({ config, gestureFrame, gestureFrameRef, paused, audioEnergy, zoom, manualEvent, onMetrics, onEvent }, ref) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const handleRef = useRef<ParticleFieldHandle | null>(null);
   const configRef = useRef(config);
-  const gesturesRef = useRef(gestureFrame);
+  const gesturesRef = gestureFrameRef;
   const pausedRef = useRef(paused);
   const audioRef = useRef(audioEnergy);
   const zoomRef = useRef(zoom);
   const manualRef = useRef(manualEvent);
   configRef.current = config;
-  gesturesRef.current = gestureFrame;
   pausedRef.current = paused;
   audioRef.current = audioEnergy;
   zoomRef.current = zoom;
@@ -192,7 +264,8 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
       onEvent("WebGL is unavailable. Use a modern browser to render the particle field.", "coral");
       return undefined;
     }
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));
+    const hardwareProfile = profileFor(detectInitialQuality());
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, hardwareProfile.maxPixelRatio));
     renderer.setSize(mount.clientWidth, mount.clientHeight);
     renderer.setClearColor(0x02040b, 0);
     renderer.autoClear = true;
@@ -204,17 +277,17 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
     const root = new THREE.Group();
     scene.add(root);
     const geometry = new THREE.BufferGeometry();
-    const positions = new Float32Array(MAX_PARTICLES * 3);
-    const velocities = new Float32Array(MAX_PARTICLES * 3);
-    const targets = new Float32Array(MAX_PARTICLES * 3);
-    const colors = new Float32Array(MAX_PARTICLES * 3);
-    const sizes = new Float32Array(MAX_PARTICLES);
+    const positions = new Float32Array(MAX_INTERACTIVE_PARTICLES * 3);
+    const velocities = new Float32Array(MAX_INTERACTIVE_PARTICLES * 3);
+    const targets = new Float32Array(MAX_INTERACTIVE_PARTICLES * 3);
+    const colors = new Float32Array(MAX_INTERACTIVE_PARTICLES * 3);
+    const sizes = new Float32Array(MAX_INTERACTIVE_PARTICLES);
     let previousFrameTime = performance.now();
     const cyan = new THREE.Color(config.visuals.colorA ?? "#79F3FF");
     const violet = new THREE.Color(config.visuals.colorB ?? "#9C7BFF");
     const color = new THREE.Color();
     const initialize = (activeCount: number, hard = false) => {
-      const active = clamp(Math.round(activeCount), 800, MAX_PARTICLES);
+      const active = clamp(Math.round(activeCount), 800, MAX_INTERACTIVE_PARTICLES);
       if (configRef.current.formation === "text") makeTextTargets(targets, configRef.current.customText, active);
       for (let index = 0; index < active; index += 1) {
         if (configRef.current.formation !== "text") setTarget(targets, index, configRef.current, active);
@@ -247,12 +320,32 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
     });
     const particles = new THREE.Points(geometry, material);
     root.add(particles);
+    const depthLayers = DEPTH_LAYER_COUNTS.map((ratio, index) => createDepthLayer(Math.max(1000, Math.round(hardwareProfile.depth * ratio)), 12 + index * 9, 0.16 + index * 0.12, cyan, violet, renderer.getPixelRatio()));
+    depthLayers.forEach((layer) => root.add(layer.points));
+    const trailCapacity = 1800;
+    const trailPositions = new Float32Array(trailCapacity * 6);
+    const trailColors = new Float32Array(trailCapacity * 6);
+    const trailGeometry = new THREE.BufferGeometry();
+    trailGeometry.setAttribute("position", new THREE.BufferAttribute(trailPositions, 3));
+    trailGeometry.setAttribute("color", new THREE.BufferAttribute(trailColors, 3));
+    const trailMaterial = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.38, blending: THREE.AdditiveBlending, depthWrite: false });
+    const trails = new THREE.LineSegments(trailGeometry, trailMaterial);
+    trails.frustumCulled = false;
+    root.add(trails);
     const haloGeometry = new THREE.RingGeometry(0.6, 0.62, 128);
     const haloMaterial = new THREE.MeshBasicMaterial({ color: 0x79f3ff, transparent: true, opacity: 0.09, side: THREE.DoubleSide, blending: THREE.AdditiveBlending });
     const halo = new THREE.Mesh(haloGeometry, haloMaterial);
     halo.rotation.x = Math.PI / 2;
     halo.visible = false;
     root.add(halo);
+    const shockwaveRingGeometry = new THREE.RingGeometry(0.94, 1, 96);
+    const shockwaveRings = Array.from({ length: 8 }, () => {
+      const mesh = new THREE.Mesh(shockwaveRingGeometry, new THREE.MeshBasicMaterial({ color: 0xffb0a8, transparent: true, opacity: 0, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false }));
+      mesh.rotation.x = Math.PI / 2;
+      mesh.visible = false;
+      root.add(mesh);
+      return mesh;
+    });
     const forces: ForceField[] = [];
     const shockwaves: Shockwave[] = [];
     let forceSeedActive = false;
@@ -264,6 +357,10 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
     let metricFrames = 0;
     let metricStart = performance.now();
     let adaptiveLevel: Metrics["adaptiveLevel"] = "cinematic";
+    let qualityProfile: QualityProfile = profileFor(configRef.current.qualityTier);
+    let desiredQualityScale = 1;
+    let qualityScale = 1;
+    let latestActiveForces = 0;
     let collisionTick = 0;
     let lastCollision = 0;
     let lastManualId = 0;
@@ -285,7 +382,7 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
       forces.length = 0;
       hands.forEach((hand) => {
         const action = currentConfig.interaction.gestureMap[hand.gesture] ?? "attract";
-        const primaryPosition = hand.gesture === "palm" || hand.gesture === "fist" ? hand.palm : hand.position;
+        const primaryPosition = hand.gesture === "palm" || hand.gesture === "fist" ? hand.palm : hand.predictedPosition;
         if (hand.gesture === "idle") return;
         let type: ForceField["type"] = "attract";
         if (action === "repel") type = "repel";
@@ -297,15 +394,20 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
         if (hand.gesture === "palm" && currentConfig.interaction.gestureMap.palm === "repel") type = "repel";
         if (hand.gesture === "fist" && currentConfig.interaction.gestureMap.fist === "blackhole") type = "blackhole";
         const physicalMultiplier = type === "attract" ? currentConfig.physics.attraction : type === "repel" ? currentConfig.physics.repulsion : type === "gravity" ? currentConfig.physics.gravity * 2 : type === "blackhole" ? currentConfig.physics.blackHoleStrength : 1;
-        const strength = (hand.gesture === "pinch" ? 1.7 : hand.gesture === "fist" ? 1.45 + Math.min(1, hand.duration / 1.8) : 0.92) * currentConfig.interaction.forceStrength * physicalMultiplier;
+        const strength = (hand.gesture === "pinch" ? 1.7 : hand.gesture === "fist" ? 1.45 + Math.min(1, hand.duration / 1.8) : 0.92) * currentConfig.interaction.forceStrength * physicalMultiplier * hand.forceMultiplier;
         addForce({ id: hand.id, type, position: primaryPosition, strength, radius: currentConfig.interaction.radius * (hand.gesture === "fist" ? 1.6 : hand.gesture === "palm" ? 1.38 : 1), velocity: hand.velocity, rotation: hand.rotation, label: type.toUpperCase() });
-        if (hand.isSwipe) addForce({ id: `${hand.id}-swipe`, type: "explosion", position: hand.position, strength: 0.85 * currentConfig.physics.explosionPower, radius: 0.12, velocity: hand.velocity, expiresAt: now + 120, label: "THROW" });
+        if (hand.isSwipe) addForce({ id: `${hand.id}-swipe`, type: "explosion", position: hand.predictedPosition, strength: Math.min(3.8, 0.85 * currentConfig.physics.explosionPower * hand.forceMultiplier), radius: clamp(0.1 + hand.speed * 0.045, 0.1, 0.28), velocity: hand.velocity, expiresAt: now + 120, label: "THROW" });
+        if (hand.isCircular) addForce({ id: `${hand.id}-orbit`, type: "vortex", position: hand.predictedPosition, strength: Math.min(2.7, 0.9 * hand.forceMultiplier), radius: clamp(0.13 + hand.speed * 0.04, 0.13, 0.3), velocity: hand.velocity, rotation: hand.rotation, label: "MOTION VORTEX" });
+        if (hand.pinchReleased) {
+          addForce({ id: `${hand.id}-release`, type: "explosion", position: hand.predictedPosition, strength: Math.min(4.2, 1.35 * currentConfig.physics.explosionPower * hand.forceMultiplier), radius: clamp(0.14 + hand.speed * 0.055, 0.14, 0.34), velocity: hand.velocity, expiresAt: now + 160, label: "PINCH RELEASE" });
+          emitShockwave(hand.predictedPosition, Math.min(2.2, hand.forceMultiplier), "PINCH RELEASE · ENERGY BURST", "coral");
+        }
       });
       const two = frameData.twoHands;
       if (two && hands.length >= 2) {
         const center = { x: (hands[0].palm.x + hands[1].palm.x) / 2, y: (hands[0].palm.y + hands[1].palm.y) / 2 };
         cameraScale = lerp(cameraScale, clamp(0.72 + two.distance * 1.25, 0.68, 1.6), 0.06);
-        root.rotation.y = lerp(root.rotation.y, two.rotation * 0.34, 0.03);
+        root.rotation.y = lerp(root.rotation.y, two.rotation * (0.34 + Math.min(0.34, Math.abs(two.rotationVelocity) * 0.03)), 0.03 + Math.min(0.08, Math.abs(two.rotationVelocity) * 0.008));
         if (two.bothOpen) {
           addForce({ id: "galaxy-seed", type: "vortex", position: center, strength: 0.64, radius: clamp(two.distance * 0.8, 0.16, 0.52), rotation: two.rotation, label: "GALAXY SEED" });
           if (!forceSeedActive && hands[0].duration > 1.05 && hands[1].duration > 1.05) {
@@ -314,10 +416,11 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
           }
         } else forceSeedActive = false;
         if (two.tunnel) addForce({ id: "gravity-tunnel", type: "tunnel", position: center, strength: 1.15, radius: two.distance * 0.9, velocity: { x: hands[1].palm.x - hands[0].palm.x, y: hands[1].palm.y - hands[0].palm.y }, label: "GRAVITY TUNNEL" });
-        if (two.bothPinched && lastTwoDistance > 0.1 && two.distance < 0.13 && now - lastCollision > 900) {
+        if (two.bothPinched && lastTwoDistance > 0.1 && two.distance < 0.13 && two.distanceVelocity < -0.25 && now - lastCollision > 650) {
           lastCollision = now;
-          emitShockwave(center, 1.8 * currentConfig.physics.explosionPower, "FIELD COLLISION · ENERGY RELEASE", "coral");
-          addForce({ id: "field-collision", type: "explosion", position: center, strength: 2.3 * currentConfig.physics.explosionPower, radius: 0.37, expiresAt: now + 180, label: "COLLISION" });
+          const collisionEnergy = 1 + Math.min(2.1, two.energy);
+          emitShockwave(center, 1.8 * currentConfig.physics.explosionPower * collisionEnergy, "FIELD COLLISION · ENERGY RELEASE", "coral");
+          addForce({ id: "field-collision", type: "explosion", position: center, strength: 2.3 * currentConfig.physics.explosionPower * collisionEnergy, radius: 0.37 + Math.min(0.16, two.energy * 0.07), expiresAt: now + 180, label: "COLLISION" });
         }
         lastTwoDistance = two.distance;
       } else {
@@ -336,7 +439,8 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
       if (configRef.current.collisionMode === "soft" || configRef.current.physics.collisionStrength < 0.05) return;
       const cell = 0.23;
       const buckets = new Map<string, number>();
-      const stride = Math.max(1, Math.floor(count / 1550));
+      const sampleBudget = Math.max(650, Math.floor(6000 / qualityProfile.collisionStride));
+      const stride = Math.max(1, Math.floor(count / sampleBudget));
       for (let i = 0; i < count; i += stride) {
         const ix = i * 3;
         const key = `${Math.floor(positions[ix] / cell)}:${Math.floor(positions[ix + 1] / cell)}:${Math.floor(positions[ix + 2] / cell)}`;
@@ -356,7 +460,16 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
             velocities[ix] += dx * inv * impulse * sign;
             velocities[ix + 1] += dy * inv * impulse * sign;
             velocities[ix + 2] += dz * inv * impulse * sign;
-            velocities[ox] -= dx * inv * impulse * sign;
+            velocities[ox] -= dz * inv * impulse * sign;
+            if (mode === "explode" && configRef.current.fragmentation) {
+              const scatter = impulse * 1.8;
+              velocities[ix] += (seeded(i, 81) - 0.5) * scatter;
+              velocities[ix + 1] += (seeded(i, 82) - 0.5) * scatter;
+              velocities[ix + 2] += (seeded(i, 83) - 0.5) * scatter;
+              velocities[ox] += (seeded(other, 84) - 0.5) * scatter;
+              velocities[ox + 1] += (seeded(other, 85) - 0.5) * scatter;
+              velocities[ox + 2] += (seeded(other, 86) - 0.5) * scatter;
+            }
             velocities[ox + 1] -= dy * inv * impulse * sign;
             velocities[ox + 2] -= dz * inv * impulse * sign;
           }
@@ -369,7 +482,10 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
       violet.set(currentConfig.visuals.colorB);
       (scene.fog as THREE.FogExp2).density = 0.002 + currentConfig.visuals.fog * 0.018;
       renderer.setClearColor(0x02040b, 0.08 + currentConfig.visuals.backgroundIntensity * 0.32);
-      const active = clamp(Math.round(currentConfig.particles.count * (0.45 + currentConfig.particles.density * 0.55) * (adaptiveLevel === "performance" ? 0.48 : adaptiveLevel === "balanced" ? 0.72 : 1)), 800, MAX_PARTICLES);
+      qualityProfile = profileFor(currentConfig.qualityTier);
+      qualityScale = lerp(qualityScale, desiredQualityScale, 0.045);
+      const configuredInteractive = currentConfig.qualityTier === "custom" ? currentConfig.particles.count : qualityProfile.interactive;
+      const active = clamp(Math.round(configuredInteractive * (0.58 + currentConfig.particles.density * 0.42) * qualityScale), 800, MAX_INTERACTIVE_PARTICLES);
       if (geometry.drawRange.count !== active) {
         geometry.setDrawRange(0, active);
         initialize(active);
@@ -383,6 +499,18 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
       publishForces();
       const now = performance.now();
       const activeForces = forces.filter((field) => !field.expiresAt || field.expiresAt > now);
+      latestActiveForces = activeForces.length;
+      const requestedDepth = Math.round(qualityProfile.depth * qualityScale);
+      const depthBudget = Math.min(requestedDepth, hardwareProfile.depth);
+      const depthCapacity = depthLayers.reduce((total, layer) => total + layer.baseCount, 0);
+      depthLayers.forEach((layer) => {
+        const layerTarget = Math.min(layer.baseCount, Math.round(depthBudget * (layer.baseCount / depthCapacity)));
+        layer.geometry.setDrawRange(0, layerTarget);
+        layer.material.uniforms.uTime.value = now * 0.001;
+        layer.material.uniforms.uColorA.value.copy(cyan);
+        layer.material.uniforms.uColorB.value.copy(violet);
+        layer.material.uniforms.uDrift.value = 0.045 + currentConfig.motion.flow * 0.18 + currentConfig.visuals.depth * 0.08;
+      });
       const physicsStep = delta * currentConfig.motion.speed * (currentConfig.reducedMotion ? 0.45 : 1);
       const rootAngle = now * 0.00016 * currentConfig.motion.rotation;
       root.rotation.z = lerp(root.rotation.z, rootAngle, 0.018);
@@ -474,9 +602,46 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
         const trailCharacter = currentConfig.visuals.trails ? 1 + currentConfig.particles.trailLength * 0.24 : 1;
         sizes[index] = (0.62 + seeded(index, 60) * 1.8 + speed * 0.85 + audioRef.current * 1.8) * currentConfig.particles.size * trailCharacter;
       }
+      const trailCount = currentConfig.visuals.trails ? Math.min(trailCapacity, Math.max(180, Math.floor(active / 7))) : 0;
+      if (trailCount) {
+        const stride = Math.max(1, Math.floor(active / trailCount));
+        for (let trailIndex = 0; trailIndex < trailCount; trailIndex += 1) {
+          const particleIndex = Math.min(active - 1, trailIndex * stride);
+          const particleOffset = particleIndex * 3;
+          const trailOffset = trailIndex * 6;
+          const speed = Math.hypot(velocities[particleOffset], velocities[particleOffset + 1], velocities[particleOffset + 2]);
+          const length = (0.04 + Math.min(0.54, speed * 1.15)) * currentConfig.particles.trailLength;
+          trailPositions[trailOffset] = positions[particleOffset];
+          trailPositions[trailOffset + 1] = positions[particleOffset + 1];
+          trailPositions[trailOffset + 2] = positions[particleOffset + 2];
+          trailPositions[trailOffset + 3] = positions[particleOffset] - velocities[particleOffset] * length;
+          trailPositions[trailOffset + 4] = positions[particleOffset + 1] - velocities[particleOffset + 1] * length;
+          trailPositions[trailOffset + 5] = positions[particleOffset + 2] - velocities[particleOffset + 2] * length;
+          trailColors[trailOffset] = colors[particleOffset];
+          trailColors[trailOffset + 1] = colors[particleOffset + 1];
+          trailColors[trailOffset + 2] = colors[particleOffset + 2];
+          trailColors[trailOffset + 3] = colors[particleOffset] * 0.08;
+          trailColors[trailOffset + 4] = colors[particleOffset + 1] * 0.08;
+          trailColors[trailOffset + 5] = colors[particleOffset + 2] * 0.08;
+        }
+        (trailGeometry.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
+        (trailGeometry.getAttribute("color") as THREE.BufferAttribute).needsUpdate = true;
+      }
+      trailGeometry.setDrawRange(0, trailCount * 2);
+      trailMaterial.opacity = currentConfig.visuals.trails ? 0.16 + currentConfig.particles.trailLength * 0.34 : 0;
       collisionTick += 1;
-      if (collisionTick % 3 === 0) resolveSampledCollisions(active);
+      if (collisionTick % Math.max(2, qualityProfile.collisionStride) === 0) resolveSampledCollisions(active);
       for (let i = shockwaves.length - 1; i >= 0; i -= 1) if (now - shockwaves[i].born > 900) shockwaves.splice(i, 1);
+      shockwaveRings.forEach((ring, index) => {
+        const wave = shockwaves[index];
+        if (!wave) { ring.visible = false; return; }
+        const age = clamp((now - wave.born) / 900, 0, 1);
+        ring.visible = true;
+        ring.position.set((wave.position.x - 0.5) * 10, -(wave.position.y - 0.5) * 6, 0.2);
+        ring.scale.setScalar(0.12 + age * (2.8 + wave.strength * 1.3));
+        (ring.material as THREE.MeshBasicMaterial).opacity = (1 - age) * 0.3;
+        (ring.material as THREE.MeshBasicMaterial).color.set(wave.strength > 1.4 ? 0xff8d86 : 0x79f3ff);
+      });
       const primary = gesturesRef.current.hands[0];
       if (primary) {
         halo.visible = true;
@@ -500,6 +665,7 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
       material.uniforms.uPixelRatio.value = renderer.getPixelRatio();
+      depthLayers.forEach((layer) => { layer.material.uniforms.uPixelRatio.value = renderer.getPixelRatio(); });
     };
     const loop = () => {
       if (disposed) return;
@@ -512,10 +678,11 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
       const metricsNow = performance.now();
       if (metricsNow - metricStart > 620) {
         const fps = Math.round((metricFrames * 1000) / (metricsNow - metricStart));
-        if (configRef.current.performanceMode || fps < 32) adaptiveLevel = "performance";
-        else if (fps < 47) adaptiveLevel = "balanced";
-        else adaptiveLevel = "cinematic";
-        onMetrics({ fps, frameTime: +(1000 / Math.max(fps, 1)).toFixed(1), particleCount: geometry.drawRange.count, trackingLatency: 0, adaptiveLevel });
+        if (configRef.current.performanceMode || fps < 32) { adaptiveLevel = "performance"; desiredQualityScale = Math.max(0.38, desiredQualityScale * 0.78); }
+        else if (fps < 47) { adaptiveLevel = "balanced"; desiredQualityScale = Math.max(0.58, desiredQualityScale * 0.9); }
+        else { adaptiveLevel = "cinematic"; desiredQualityScale = Math.min(1, desiredQualityScale + 0.035); }
+        const depthRendered = depthLayers.reduce((total, layer) => total + layer.geometry.drawRange.count, 0);
+        onMetrics({ fps, frameTime: +(1000 / Math.max(fps, 1)).toFixed(1), particleCount: geometry.drawRange.count + depthRendered, trackingLatency: 0, adaptiveLevel, qualityTier: configRef.current.qualityTier, targetParticles: (configRef.current.qualityTier === "custom" ? configRef.current.particles.count : qualityProfile.interactive) + Math.min(qualityProfile.depth, hardwareProfile.depth), activeForces: latestActiveForces, trackingFps: 0, renderMode: depthRendered ? "gpu-layered" : "gpu-safe" });
         metricFrames = 0; metricStart = metricsNow;
       }
       frame = requestAnimationFrame(loop);
@@ -541,7 +708,7 @@ const ParticleField = forwardRef<ParticleFieldHandle, Props>(function ParticleFi
       disposed = true;
       cancelAnimationFrame(frame);
       window.removeEventListener("resize", resize);
-      geometry.dispose(); material.dispose(); haloGeometry.dispose(); haloMaterial.dispose(); renderer.dispose();
+      geometry.dispose(); material.dispose(); haloGeometry.dispose(); haloMaterial.dispose(); shockwaveRingGeometry.dispose(); shockwaveRings.forEach((ring) => (ring.material as THREE.Material).dispose()); trailGeometry.dispose(); trailMaterial.dispose(); depthLayers.forEach((layer) => { layer.geometry.dispose(); layer.material.dispose(); }); renderer.dispose();
       renderer.domElement.remove();
       handleRef.current = null;
     };

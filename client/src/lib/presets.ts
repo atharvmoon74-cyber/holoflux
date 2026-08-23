@@ -25,6 +25,7 @@ export const DEFAULT_CONFIG: HoloConfig = {
   shockwave: true,
   fragmentation: true,
   performanceMode: false,
+  qualityTier: "balanced",
   reducedMotion: false,
   highContrast: false,
 };

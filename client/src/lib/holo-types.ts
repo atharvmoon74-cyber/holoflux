@@ -25,6 +25,7 @@ export type ForceType = "attract" | "repel" | "gravity" | "blackhole" | "vortex"
 export type UniverseMode = "galaxy" | "vortex" | "blackhole" | "supernova" | "quantum" | "fluid" | "magnetic" | "nebula" | "dna" | "neural" | "planet" | "dust";
 export type Formation = "sphere" | "heart" | "galaxy" | "spiral" | "dna" | "cube" | "torus" | "flower" | "saturn" | "infinity" | "star" | "wave" | "text";
 export type CollisionMode = "bounce" | "merge" | "explode" | "elastic" | "soft";
+export type QualityTier = "eco" | "balanced" | "high" | "ultra" | "extreme" | "custom";
 
 export interface ForceField {
   id: string;
@@ -42,6 +43,8 @@ export interface HandPose {
   id: string;
   handedness: "Left" | "Right" | "Unknown";
   position: Vec2;
+  rawPosition: Vec2;
+  predictedPosition: Vec2;
   wrist: Vec2;
   palm: Vec2;
   velocity: Vec2;
@@ -53,6 +56,10 @@ export interface HandPose {
   confidence: number;
   duration: number;
   isSwipe: boolean;
+  isCircular: boolean;
+  pinchReleased: boolean;
+  speed: number;
+  forceMultiplier: number;
   landmarkPoints: Vec2[];
 }
 
@@ -63,6 +70,9 @@ export interface TwoHandState {
   bothOpen: boolean;
   bothPinched: boolean;
   tunnel: boolean;
+  distanceVelocity: number;
+  rotationVelocity: number;
+  energy: number;
 }
 
 export interface GestureFrame {
@@ -129,6 +139,7 @@ export interface HoloConfig {
   shockwave: boolean;
   fragmentation: boolean;
   performanceMode: boolean;
+  qualityTier: QualityTier;
   reducedMotion: boolean;
   highContrast: boolean;
 }
@@ -147,6 +158,11 @@ export interface Metrics {
   particleCount: number;
   trackingLatency: number;
   adaptiveLevel: "cinematic" | "balanced" | "performance";
+  qualityTier: QualityTier;
+  targetParticles: number;
+  activeForces: number;
+  trackingFps: number;
+  renderMode: "gpu-layered" | "gpu-safe";
 }
 
 export interface ParticleFieldHandle {

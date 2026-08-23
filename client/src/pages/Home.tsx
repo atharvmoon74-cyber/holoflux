@@ -10,19 +10,20 @@ import { GestureEngine } from "@/lib/gesture-engine";
 import type { GestureFrame, GestureName, HandPose, HoloConfig, Metrics, ParticleFieldHandle, Preset, Vec2 } from "@/lib/holo-types";
 import { BUILT_IN_PRESETS, DEFAULT_CONFIG, mergeConfig } from "@/lib/presets";
 import { VisionEngine } from "@/lib/vision-engine";
+import { detectInitialQuality, profileFor } from "@/lib/performance-profile";
 
 type CameraState = "idle" | "initializing" | "active" | "lost" | "error" | "off";
 type HoloEvent = { id: number; message: string; tone: "cyan" | "coral" | "violet" };
 type ManualEvent = { id: number; type: "explosion" | "blackhole" | "vortex" | "galaxy"; position: Vec2 } | null;
 
 const EMPTY_FRAME: GestureFrame = { hands: [], twoHands: null };
-const DEFAULT_METRICS: Metrics = { fps: 60, frameTime: 16.7, particleCount: DEFAULT_CONFIG.particles.count, trackingLatency: 0, adaptiveLevel: "cinematic" };
+const DEFAULT_METRICS: Metrics = { fps: 60, frameTime: 16.7, particleCount: DEFAULT_CONFIG.particles.count, trackingLatency: 0, adaptiveLevel: "cinematic", qualityTier: DEFAULT_CONFIG.qualityTier, targetParticles: DEFAULT_CONFIG.particles.count, activeForces: 0, trackingFps: 0, renderMode: "gpu-layered" };
 const bootLines = ["INITIALIZING VISION ENGINE…", "CALIBRATING PARTICLE FIELD…", "CONNECTING HAND TRACKING…", "PHYSICS ENGINE ONLINE"];
 
 function virtualHand(position: Vec2, gesture: GestureName, velocity: Vec2, id = "virtual-hand"): HandPose {
   return {
-    id, handedness: "Unknown", position, wrist: position, palm: position, velocity, acceleration: { x: 0, y: 0 }, pinch: gesture === "pinch" ? 0.03 : 0.18, openness: gesture === "palm" ? 1 : gesture === "fist" ? 0 : 0.45,
-    rotation: 0, gesture, confidence: 1, duration: 0, isSwipe: gesture === "index" && Math.hypot(velocity.x, velocity.y) > 1.25, landmarkPoints: [position],
+    id, handedness: "Unknown", position, rawPosition: position, predictedPosition: position, wrist: position, palm: position, velocity, acceleration: { x: 0, y: 0 }, pinch: gesture === "pinch" ? 0.03 : 0.18, openness: gesture === "palm" ? 1 : gesture === "fist" ? 0 : 0.45,
+    rotation: 0, gesture, confidence: 1, duration: 0, isSwipe: gesture === "index" && Math.hypot(velocity.x, velocity.y) > 1.25, isCircular: false, pinchReleased: false, speed: Math.hypot(velocity.x, velocity.y), forceMultiplier: 1, landmarkPoints: [position],
   };
 }
 
@@ -31,12 +32,15 @@ function buildVirtualFrame(points: Vec2[], gesture: GestureName, velocity: Vec2)
   if (hands.length < 2) return { hands, twoHands: null };
   const a = hands[0]; const b = hands[1];
   const distance = Math.hypot(a.palm.x - b.palm.x, a.palm.y - b.palm.y);
-  return { hands, twoHands: { active: true, distance, rotation: Math.atan2(b.palm.y - a.palm.y, b.palm.x - a.palm.x), bothOpen: true, bothPinched: false, tunnel: false } };
+  return { hands, twoHands: { active: true, distance, rotation: Math.atan2(b.palm.y - a.palm.y, b.palm.x - a.palm.x), bothOpen: true, bothPinched: false, tunnel: false, distanceVelocity: 0, rotationVelocity: 0, energy: Math.min(2, Math.hypot(velocity.x, velocity.y)) } };
 }
 
 export default function Home() {
   const [config, setConfig] = useState<HoloConfig>(() => {
-    try { return mergeConfig(DEFAULT_CONFIG, JSON.parse(localStorage.getItem("holoflux-config") || "{}")); } catch { return DEFAULT_CONFIG; }
+    try {
+      const saved = localStorage.getItem("holoflux-config");
+      return saved ? mergeConfig(DEFAULT_CONFIG, JSON.parse(saved)) : mergeConfig(DEFAULT_CONFIG, { qualityTier: detectInitialQuality() });
+    } catch { return mergeConfig(DEFAULT_CONFIG, { qualityTier: detectInitialQuality() }); }
   });
   const [boot, setBoot] = useState(true);
   const [cameraState, setCameraState] = useState<CameraState>("idle");
@@ -71,6 +75,10 @@ export default function Home() {
   const eventTimerRef = useRef<number | null>(null);
   const manualIdRef = useRef(0);
   const configRef = useRef(config);
+  const liveGestureRef = useRef<GestureFrame>(EMPTY_FRAME);
+  const lastGestureUiUpdateRef = useRef(0);
+  const trackingFramesRef = useRef(0);
+  const trackingStartRef = useRef(performance.now());
   configRef.current = config;
 
   useEffect(() => { localStorage.setItem("holoflux-config", JSON.stringify(config)); }, [config]);
@@ -90,12 +98,13 @@ export default function Home() {
     manualIdRef.current += 1;
     setManualEvent({ id: manualIdRef.current, type, position });
   }, []);
-  const handleMetrics = useCallback((next: Metrics) => setMetrics((current) => ({ ...next, trackingLatency: current.trackingLatency })), []);
+  const handleMetrics = useCallback((next: Metrics) => setMetrics((current) => ({ ...next, trackingLatency: current.trackingLatency, trackingFps: current.trackingFps })), []);
+  useEffect(() => { visionRef.current?.setInferenceInterval(profileFor(config.qualityTier).trackingInterval); }, [config.qualityTier]);
 
   const exitCamera = useCallback((announce = true) => {
     visionRef.current?.stop(); visionRef.current = null;
     streamRef.current = null;
-    setCameraState("off"); setGestureFrame(EMPTY_FRAME);
+    setCameraState("off"); liveGestureRef.current = EMPTY_FRAME; setGestureFrame(EMPTY_FRAME);
     if (announce) pushEvent("CAMERA OFF — MOUSE CONTROL ACTIVE", "cyan");
   }, [pushEvent]);
 
@@ -105,8 +114,19 @@ export default function Home() {
     const engine = new VisionEngine(
       (rawHands, latency) => {
         const frame = gestureEngineRef.current.update(rawHands, configRef.current);
-        setGestureFrame(frame);
-        setMetrics((current) => ({ ...current, trackingLatency: +latency.toFixed(1) }));
+        liveGestureRef.current = frame;
+        const uiNow = performance.now();
+        if (uiNow - lastGestureUiUpdateRef.current > 90) {
+          lastGestureUiUpdateRef.current = uiNow;
+          setGestureFrame(frame);
+        }
+        trackingFramesRef.current += 1;
+        if (uiNow - trackingStartRef.current > 650) {
+          const trackingFps = Math.round((trackingFramesRef.current * 1000) / (uiNow - trackingStartRef.current));
+          trackingFramesRef.current = 0;
+          trackingStartRef.current = uiNow;
+          setMetrics((current) => ({ ...current, trackingLatency: +latency.toFixed(1), trackingFps }));
+        }
       },
       (status, message) => {
         if (status === "active") setCameraState("active");
@@ -115,6 +135,7 @@ export default function Home() {
       },
     );
     visionRef.current = engine;
+    engine.setInferenceInterval(profileFor(configRef.current.qualityTier).trackingInterval);
     try {
       const stream = await engine.start();
       streamRef.current = stream;
@@ -130,7 +151,9 @@ export default function Home() {
     const dt = Math.max(0.016, (now - previous.time) / 1000);
     const velocity = { x: (point.x - previous.point.x) / dt, y: (point.y - previous.point.y) / dt };
     pointerRef.current = { point, time: now, velocity, gesture };
-    setGestureFrame(buildVirtualFrame([...Array.from(touchPointsRef.current.values()), ...(touchPointsRef.current.size ? [] : [point])], gesture, velocity));
+    const frame = buildVirtualFrame([...Array.from(touchPointsRef.current.values()), ...(touchPointsRef.current.size ? [] : [point])], gesture, velocity);
+    liveGestureRef.current = frame;
+    setGestureFrame(frame);
   }, []);
 
   const pointFromEvent = (eventLike: { currentTarget: EventTarget & HTMLElement; clientX: number; clientY: number }): Vec2 => {
@@ -234,9 +257,9 @@ export default function Home() {
   return <main className={`holoflux-shell ${config.highContrast ? "high-contrast" : ""} ${recordingMode ? "recording-mode" : ""}`} onContextMenu={(eventLike) => eventLike.preventDefault()}>
     <div className="nebula-surface" />
     <div className="interaction-layer" onPointerMove={handlePointerMove} onPointerDown={handlePointerDown} onPointerUp={handlePointerUp} onPointerLeave={handlePointerUp} onDoubleClick={(eventLike) => { if (fallbackActive) submitManualEvent("explosion", pointFromEvent(eventLike)); }} onWheel={(eventLike) => { if (fallbackActive) setZoom((current) => Math.max(0.55, Math.min(1.8, current - eventLike.deltaY * 0.0008))); }}>
-      <ParticleField ref={fieldRef} config={config} gestureFrame={gestureFrame} paused={paused} audioEnergy={audioEnergy} zoom={zoom} manualEvent={manualEvent} onMetrics={handleMetrics} onEvent={pushEvent} />
+      <ParticleField ref={fieldRef} config={config} gestureFrame={gestureFrame} gestureFrameRef={liveGestureRef} paused={paused} audioEnergy={audioEnergy} zoom={zoom} manualEvent={manualEvent} onMetrics={handleMetrics} onEvent={pushEvent} />
     </div>
-    {gestureFrame.hands.map((hand) => <div key={hand.id} className={`force-reticle gesture-${hand.gesture}`} style={{ left: `${hand.position.x * 100}%`, top: `${hand.position.y * 100}%` }}><i /><b>{(config.interaction.gestureMap[hand.gesture] ?? "attract").toUpperCase()}</b><span>FORCE {Math.round(hand.confidence * 100)}%</span></div>)}
+    {gestureFrame.hands.map((hand) => <div key={hand.id} className={`force-reticle gesture-${hand.gesture}`} style={{ left: `${hand.predictedPosition.x * 100}%`, top: `${hand.predictedPosition.y * 100}%` }}><i /><b>{(config.interaction.gestureMap[hand.gesture] ?? "attract").toUpperCase()}</b><span>FORCE {Math.round(hand.forceMultiplier * 100)}% · {hand.speed.toFixed(1)}V</span></div>)}
 
     {!recordingMode && <>
       <header className="top-line">
@@ -248,7 +271,7 @@ export default function Home() {
       {cameraState === "lost" && <div className="soft-alert"><Hand size={16} /><span><b>Hands temporarily lost.</b> Move into better lighting or continue with mouse controls.</span></div>}
       {cameraState === "error" && <div className="soft-alert error"><VideoOff size={16} /><span><b>We couldn't access your camera.</b> {cameraMessage || "You can continue with mouse controls."}</span><button onClick={() => setCameraState("off")}>Use mouse</button></div>}
       {cameraPreview && streamRef.current && <section className="camera-preview"><div><span>LOCAL CAMERA</span><button onClick={() => setCameraPreview(false)}><X size={14} /></button></div><video ref={previewVideoRef} autoPlay muted playsInline /></section>}
-      <HoloControls open={panelOpen} active={activePanel} config={config} customPresets={savedPresets} onActive={setActivePanel} onPatch={patchConfig} onPreset={selectPreset} onSavePreset={savePreset} onImportPreset={importPreset} onDeletePreset={deletePreset} onResetControls={resetControls} onCapture={capturePhoto} />
+      <HoloControls open={panelOpen} active={activePanel} config={config} metrics={metrics} customPresets={savedPresets} onActive={setActivePanel} onPatch={patchConfig} onPreset={selectPreset} onSavePreset={savePreset} onImportPreset={importPreset} onDeletePreset={deletePreset} onResetControls={resetControls} onCapture={capturePhoto} />
       <nav className="command-dock" aria-label="Universe commands">
         <button onClick={() => setPanelOpen((current) => !current)} className={panelOpen ? "dock-active" : ""} title="Universe controls"><Settings2 size={18} /><span>Configure</span></button>
         <button onClick={() => setPaused((current) => !current)} title="Play or pause"><>{paused ? <Play size={18} /> : <Pause size={18} />}</><span>{paused ? "Resume" : "Pause"}</span></button>
@@ -262,7 +285,7 @@ export default function Home() {
         <button onClick={toggleFullscreen} title="Toggle fullscreen"><Maximize2 size={18} /><span>Full screen</span></button>
       </nav>
       <footer className="bottom-credit"><span>SCROLL TO ZOOM · DOUBLE CLICK TO EXPLODE</span><b>Made by Atharv Moon · IIT Tirupati</b><button onClick={() => setDebug((current) => !current)} aria-label="Toggle developer panel">DEV</button></footer>
-      {debug && <aside className="dev-panel"><div><b>DEVELOPER MODE</b><button onClick={() => setDebug(false)}><X size={14} /></button></div><dl><dt>FPS</dt><dd>{metrics.fps}</dd><dt>FRAME TIME</dt><dd>{metrics.frameTime}ms</dd><dt>PARTICLES</dt><dd>{metrics.particleCount.toLocaleString()}</dd><dt>TRACKING</dt><dd>{metrics.trackingLatency}ms</dd><dt>ACTIVE HANDS</dt><dd>{gestureFrame.hands.length}</dd><dt>GESTURE</dt><dd>{gestureFrame.hands[0]?.gesture ?? "none"}</dd><dt>MODE</dt><dd>{metrics.adaptiveLevel}</dd></dl></aside>}
+      {debug && <aside className="dev-panel"><div><b>DEVELOPER MODE</b><button onClick={() => setDebug(false)}><X size={14} /></button></div><dl><dt>FPS</dt><dd>{metrics.fps}</dd><dt>FRAME TIME</dt><dd>{metrics.frameTime}ms</dd><dt>PARTICLES</dt><dd>{metrics.particleCount.toLocaleString()}</dd><dt>TARGET</dt><dd>{metrics.targetParticles.toLocaleString()}</dd><dt>FORCES</dt><dd>{metrics.activeForces}</dd><dt>TRACKING</dt><dd>{metrics.trackingLatency}ms · {metrics.trackingFps}hz</dd><dt>ACTIVE HANDS</dt><dd>{gestureFrame.hands.length}</dd><dt>GESTURE</dt><dd>{gestureFrame.hands[0]?.gesture ?? "none"}</dd><dt>QUALITY</dt><dd>{metrics.qualityTier} · {metrics.adaptiveLevel}</dd><dt>RENDER</dt><dd>{metrics.renderMode}</dd></dl></aside>}
     </>}
 
     {boot && <section className="boot-sequence" aria-label="Initializing HOLOFLUX"><div className="boot-mark"><img src="/manus-storage/holoflux-flux-logo_bc663407.png" alt="" /><span /></div><h1>HOLOFLUX</h1><p>A LIVING PARTICLE UNIVERSE</p><div className="boot-lines">{bootLines.map((line, index) => <span key={line} style={{ animationDelay: `${0.36 + index * 0.52}s` }}>{line}<i /></span>)}</div></section>}

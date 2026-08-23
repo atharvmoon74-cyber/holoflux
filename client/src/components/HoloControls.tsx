@@ -3,15 +3,16 @@
  */
 import { useRef } from "react";
 import { ArchiveRestore, Atom, Box, Camera, CircleDotDashed, Dna, Download, Gauge, Hand, Orbit, Palette, Play, Plus, RotateCcw, Save, Sparkles, Trash2, Upload } from "lucide-react";
-import type { CollisionMode, Formation, GestureAction, GestureName, HoloConfig, Preset, UniverseMode } from "@/lib/holo-types";
+import type { CollisionMode, Formation, GestureAction, GestureName, HoloConfig, Metrics, Preset, QualityTier, UniverseMode } from "@/lib/holo-types";
 import { BUILT_IN_PRESETS } from "@/lib/presets";
 
-export type PanelId = "mode" | "physics" | "particles" | "gestures" | "visuals" | "presets" | "collision" | "calibration";
+export type PanelId = "mode" | "physics" | "particles" | "gestures" | "visuals" | "presets" | "collision" | "calibration" | "performance";
 
 type Props = {
   open: boolean;
   active: PanelId;
   config: HoloConfig;
+  metrics: Metrics;
   customPresets: Preset[];
   onActive: (panel: PanelId) => void;
   onPatch: (patch: Partial<HoloConfig>) => void;
@@ -47,7 +48,7 @@ function SectionTitle({ kicker, title, detail }: { kicker: string; title: string
   return <div className="panel-title"><span>{kicker}</span><h2>{title}</h2>{detail && <p>{detail}</p>}</div>;
 }
 
-export default function HoloControls({ open, active, config, customPresets, onActive, onPatch, onPreset, onSavePreset, onImportPreset, onDeletePreset, onResetControls, onCapture }: Props) {
+export default function HoloControls({ open, active, config, metrics, customPresets, onActive, onPatch, onPreset, onSavePreset, onImportPreset, onDeletePreset, onResetControls, onCapture }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
   const patchParticles = (patch: Partial<HoloConfig["particles"]>) => onPatch({ particles: { ...config.particles, ...patch } });
   const patchPhysics = (patch: Partial<HoloConfig["physics"]>) => onPatch({ physics: { ...config.physics, ...patch } });
@@ -55,7 +56,7 @@ export default function HoloControls({ open, active, config, customPresets, onAc
   const patchVisuals = (patch: Partial<HoloConfig["visuals"]>) => onPatch({ visuals: { ...config.visuals, ...patch } });
   const patchInteraction = (patch: Partial<HoloConfig["interaction"]>) => onPatch({ interaction: { ...config.interaction, ...patch } });
   const nav: Array<{ id: PanelId; label: string; icon: typeof Orbit }> = [
-    { id: "mode", label: "Mode", icon: Orbit }, { id: "physics", label: "Physics", icon: Atom }, { id: "particles", label: "Particles", icon: Sparkles }, { id: "gestures", label: "Gestures", icon: Hand }, { id: "visuals", label: "Visuals", icon: Palette }, { id: "presets", label: "Presets", icon: ArchiveRestore }, { id: "collision", label: "Collision Lab", icon: CircleDotDashed }, { id: "calibration", label: "Calibrate", icon: Gauge },
+    { id: "mode", label: "Mode", icon: Orbit }, { id: "physics", label: "Physics", icon: Atom }, { id: "particles", label: "Particles", icon: Sparkles }, { id: "gestures", label: "Gestures", icon: Hand }, { id: "visuals", label: "Visuals", icon: Palette }, { id: "presets", label: "Presets", icon: ArchiveRestore }, { id: "collision", label: "Collision Lab", icon: CircleDotDashed }, { id: "calibration", label: "Calibrate", icon: Gauge }, { id: "performance", label: "Quality", icon: Gauge },
   ];
   const importPreset = (file: File | undefined) => {
     if (!file) return;
@@ -135,6 +136,14 @@ export default function HoloControls({ open, active, config, customPresets, onAc
         <Slider label="Interaction radius" value={config.interaction.radius} min={0.08} max={0.45} step={0.01} onChange={(value) => patchInteraction({ radius: value })} />
         <div className="select-row"><span>Dominant hand</span><select value={config.interaction.dominantHand} onChange={(event) => patchInteraction({ dominantHand: event.target.value as HoloConfig["interaction"]["dominantHand"] })}><option value="auto">Auto</option><option value="left">Left</option><option value="right">Right</option></select></div>
         <div className="calibration-meter"><span>Pinch detection</span><b>{Math.round((1 - config.interaction.pinchThreshold / 0.14) * 100)}%</b><i><em style={{ width: `${(1 - config.interaction.pinchThreshold / 0.14) * 100}%` }} /></i></div>
+      </>}
+      {active === "performance" && <>
+        <SectionTitle kicker="Adaptive quality" title="Optimize the universe" detail="The renderer keeps interactive physics responsive while GPU depth layers expand the visible world." />
+        <div className="quality-grid">{(["eco", "balanced", "high", "ultra", "extreme", "custom"] as QualityTier[]).map((tier) => <button key={tier} className={config.qualityTier === tier ? "quality-option active" : "quality-option"} onClick={() => onPatch({ qualityTier: tier })}><b>{tier}</b><span>{tier === "eco" ? "12K" : tier === "balanced" ? "30K" : tier === "high" ? "60K" : tier === "ultra" ? "120K" : tier === "extreme" ? "UP TO 220K" : "manual"}</span></button>)}</div>
+        <div className="performance-readout"><span>RENDERED NOW</span><b>{metrics.particleCount.toLocaleString()}</b><span>TARGET · {metrics.targetParticles.toLocaleString()}</span><span>{metrics.renderMode.toUpperCase()}</span></div>
+        <Toggle label="Force performance mode" checked={config.performanceMode} onChange={(value) => onPatch({ performanceMode: value })} />
+        <button className="primary-action" onClick={() => onPatch({ qualityTier: "extreme", performanceMode: false, particles: { ...config.particles, density: 1, trailLength: 0.9 }, physics: { ...config.physics, turbulence: Math.max(0.48, config.physics.turbulence), explosionPower: Math.max(1.6, config.physics.explosionPower) } })}><Sparkles size={16} />Extreme Universe</button>
+        <div className="gesture-card"><Gauge size={18} /><p><b>Optimized for your device</b><br />Low frame rates reduce workload gradually. Stable performance restores detail without a visual jump.</p></div>
       </>}
       {active === "presets" && <>
         <SectionTitle kicker="Memory bank" title="Universe presets" detail="Built-in and saved configurations update the running field immediately." />
